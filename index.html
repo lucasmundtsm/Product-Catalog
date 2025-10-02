@@ -476,6 +476,9 @@
                         <small>Branch to commit to (default: main)</small>
                     </div>
                     <button class="btn btn-small" onclick="saveConfig()">💾 Save Configuration</button>
+                    <button class="btn btn-small btn-secondary" onclick="testConnection()" style="margin-left: 10px;">
+                        🔌 Test Connection
+                    </button>
                 </div>
 
                 <div class="help-text">
@@ -582,6 +585,56 @@
         let currentFileData = null;
         let githubConfig = null;
 
+        // Test GitHub connection
+        async function testConnection() {
+            const config = {
+                token: document.getElementById('githubToken').value.trim(),
+                owner: document.getElementById('repoOwner').value.trim(),
+                repo: document.getElementById('repoName').value.trim(),
+                filePath: document.getElementById('filePath').value.trim(),
+                branch: document.getElementById('branch').value.trim()
+            };
+
+            if (!config.token || !config.owner || !config.repo) {
+                showAlert('Please fill in all required fields first', 'warning');
+                return;
+            }
+
+            try {
+                showProgress(50);
+                console.log('Testing connection...');
+                console.log('Config:', { ...config, token: config.token.substring(0, 7) + '...' });
+                
+                // Test repository access
+                const repoUrl = `https://api.github.com/repos/${config.owner}/${config.repo}`;
+                const repoResponse = await fetch(repoUrl, {
+                    headers: {
+                        'Authorization': `token ${config.token}`,
+                        'Accept': 'application/vnd.github.v3+json'
+                    }
+                });
+
+                console.log('Repository check status:', repoResponse.status);
+
+                if (!repoResponse.ok) {
+                    const errorData = await repoResponse.json();
+                    throw new Error(`Repository access failed (${repoResponse.status}): ${errorData.message}`);
+                }
+
+                const repoData = await repoResponse.json();
+                console.log('Repository found:', repoData.full_name);
+                console.log('Repository visibility:', repoData.private ? 'Private' : 'Public');
+
+                showProgress(100);
+                showAlert(`✅ Connection successful!\nRepository: ${repoData.full_name}\nVisibility: ${repoData.private ? 'Private' : 'Public'}`, 'success');
+                setTimeout(() => hideProgress(), 500);
+            } catch (error) {
+                console.error('Connection test failed:', error);
+                showAlert('❌ Connection test failed: ' + error.message, 'error');
+                hideProgress();
+            }
+        }
+
         // Load saved configuration
         function loadConfig() {
             const saved = localStorage.getItem('githubCatalogConfig');
@@ -623,6 +676,54 @@
             fetchCurrentCatalog();
         }
 
+        // Parse and display catalog statistics
+        function parseAndDisplayCatalog(content, fileMetadata) {
+            Papa.parse(content, {
+                header: true,
+                skipEmptyLines: true,
+                dynamicTyping: false,
+                complete: function(results) {
+                    console.log('Total rows parsed:', results.data.length);
+                    console.log('Parse errors:', results.errors.length);
+                    if (results.data[0]) {
+                        console.log('First row sample:', results.data[0]);
+                    }
+                    
+                    // Filter out empty rows more robustly
+                    const validProducts = results.data.filter(row => {
+                        if (!row) return false;
+                        // Check if row has meaningful data (not all empty values)
+                        const hasData = Object.values(row).some(val => val && String(val).trim() !== '');
+                        return hasData;
+                    });
+                    
+                    console.log('Valid products after filtering:', validProducts.length);
+                    
+                    document.getElementById('currentProducts').textContent = validProducts.length.toLocaleString();
+                    
+                    // Use current date if commit info not available
+                    const lastUpdate = fileMetadata.commit?.committer?.date || fileMetadata.updated_at || new Date().toISOString();
+                    document.getElementById('lastUpdated').textContent = new Date(lastUpdate).toLocaleDateString();
+                    
+                    document.getElementById('fileSize').textContent = formatBytes(fileMetadata.size);
+                    document.getElementById('repoStatus').textContent = '✅ Connected';
+                    document.getElementById('repoStatus').style.color = 'var(--success)';
+                    
+                    if (validProducts.length === 0 && results.data.length > 0) {
+                        showAlert('⚠️ Connected to GitHub but catalog appears empty or parsing failed. Check browser console (F12) for details.', 'warning');
+                    }
+                    
+                    showProgress(100);
+                    setTimeout(() => hideProgress(), 500);
+                },
+                error: function(error) {
+                    console.error('CSV parse error:', error);
+                    showAlert('Error parsing catalog from GitHub: ' + error.message, 'error');
+                    hideProgress();
+                }
+            });
+        }
+
         // Fetch current catalog from GitHub
         async function fetchCurrentCatalog() {
             if (!githubConfig) {
@@ -634,6 +735,9 @@
                 showProgress(30);
                 const url = `https://api.github.com/repos/${githubConfig.owner}/${githubConfig.repo}/contents/${githubConfig.filePath}?ref=${githubConfig.branch}`;
                 
+                console.log('Fetching from URL:', url);
+                console.log('Using token:', githubConfig.token ? `${githubConfig.token.substring(0, 7)}...` : 'NO TOKEN');
+                
                 const response = await fetch(url, {
                     headers: {
                         'Authorization': `token ${githubConfig.token}`,
@@ -641,12 +745,33 @@
                     }
                 });
 
-                showProgress(70);
+                console.log('Response status:', response.status);
+                console.log('Response ok:', response.ok);
+                showProgress(50);
 
                 if (response.ok) {
                     const data = await response.json();
                     
-                    // Decode base64 content
+                    // For large files, GitHub API might return download_url instead of inline content
+                    if (!data.content && data.download_url) {
+                        console.log('Large file detected, using download URL:', data.download_url);
+                        showProgress(50);
+                        
+                        // Fetch the file directly (no auth needed for public repos and avoids CORS issues)
+                        const downloadResponse = await fetch(data.download_url);
+                        
+                        if (!downloadResponse.ok) {
+                            throw new Error(`Failed to download file: ${downloadResponse.status}`);
+                        }
+                        
+                        const content = await downloadResponse.text();
+                        console.log('File downloaded, size:', content.length, 'bytes');
+                        showProgress(70);
+                        parseAndDisplayCatalog(content, data);
+                        return;
+                    }
+                    
+                    // Decode base64 content for smaller files
                     let content;
                     try {
                         content = decodeURIComponent(escape(atob(data.content.replace(/\s/g, ''))));
@@ -654,30 +779,8 @@
                         content = atob(data.content.replace(/\s/g, ''));
                     }
                     
-                    // Parse CSV to get stats
-                    Papa.parse(content, {
-                        header: true,
-                        skipEmptyLines: true,
-                        complete: function(results) {
-                            document.getElementById('currentProducts').textContent = results.data.length.toLocaleString();
-                            
-                            // Use current date if commit info not available
-                            const lastUpdate = data.commit?.committer?.date || data.updated_at || new Date().toISOString();
-                            document.getElementById('lastUpdated').textContent = new Date(lastUpdate).toLocaleDateString();
-                            
-                            document.getElementById('fileSize').textContent = formatBytes(data.size);
-                            document.getElementById('repoStatus').textContent = '✅ Connected';
-                            document.getElementById('repoStatus').style.color = 'var(--success)';
-                            
-                            showProgress(100);
-                            setTimeout(() => hideProgress(), 500);
-                        },
-                        error: function(error) {
-                            console.error('CSV parse error:', error);
-                            showAlert('Error parsing catalog from GitHub: ' + error.message, 'error');
-                            hideProgress();
-                        }
-                    });
+                    showProgress(70);
+                    parseAndDisplayCatalog(content, data);
                 } else if (response.status === 404) {
                     document.getElementById('currentProducts').textContent = '0';
                     document.getElementById('lastUpdated').textContent = 'Not Created';
@@ -690,11 +793,20 @@
                 }
             } catch (error) {
                 console.error('Error fetching catalog:', error);
+                console.error('Error details:', {
+                    name: error.name,
+                    message: error.message,
+                    stack: error.stack
+                });
                 
                 // Provide more specific error messages
                 let errorMsg = 'Error connecting to GitHub: ';
-                if (error.message.includes('Failed to fetch')) {
-                    errorMsg += 'Network error. Check your internet connection.';
+                if (error.message.includes('Failed to fetch') || error.name === 'TypeError') {
+                    errorMsg += 'Network error. This could mean:\n';
+                    errorMsg += '• Internet connection issue\n';
+                    errorMsg += '• CORS policy blocking the request\n';
+                    errorMsg += '• Invalid token format\n';
+                    errorMsg += 'Check browser console (F12) for details.';
                 } else if (error.message.includes('401')) {
                     errorMsg += 'Invalid token. Please check your Personal Access Token.';
                 } else if (error.message.includes('403')) {
