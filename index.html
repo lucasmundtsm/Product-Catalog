@@ -645,7 +645,14 @@
 
                 if (response.ok) {
                     const data = await response.json();
-                    const content = atob(data.content);
+                    
+                    // Decode base64 content
+                    let content;
+                    try {
+                        content = decodeURIComponent(escape(atob(data.content.replace(/\s/g, ''))));
+                    } catch (e) {
+                        content = atob(data.content.replace(/\s/g, ''));
+                    }
                     
                     // Parse CSV to get stats
                     Papa.parse(content, {
@@ -653,13 +660,22 @@
                         skipEmptyLines: true,
                         complete: function(results) {
                             document.getElementById('currentProducts').textContent = results.data.length.toLocaleString();
-                            document.getElementById('lastUpdated').textContent = new Date(data.commit.committer.date || Date.now()).toLocaleDateString();
+                            
+                            // Use current date if commit info not available
+                            const lastUpdate = data.commit?.committer?.date || data.updated_at || new Date().toISOString();
+                            document.getElementById('lastUpdated').textContent = new Date(lastUpdate).toLocaleDateString();
+                            
                             document.getElementById('fileSize').textContent = formatBytes(data.size);
                             document.getElementById('repoStatus').textContent = '✅ Connected';
                             document.getElementById('repoStatus').style.color = 'var(--success)';
                             
                             showProgress(100);
                             setTimeout(() => hideProgress(), 500);
+                        },
+                        error: function(error) {
+                            console.error('CSV parse error:', error);
+                            showAlert('Error parsing catalog from GitHub: ' + error.message, 'error');
+                            hideProgress();
                         }
                     });
                 } else if (response.status === 404) {
@@ -674,7 +690,22 @@
                 }
             } catch (error) {
                 console.error('Error fetching catalog:', error);
-                showAlert('Error connecting to GitHub: ' + error.message, 'error');
+                
+                // Provide more specific error messages
+                let errorMsg = 'Error connecting to GitHub: ';
+                if (error.message.includes('Failed to fetch')) {
+                    errorMsg += 'Network error. Check your internet connection.';
+                } else if (error.message.includes('401')) {
+                    errorMsg += 'Invalid token. Please check your Personal Access Token.';
+                } else if (error.message.includes('403')) {
+                    errorMsg += 'Token lacks permissions. Ensure "repo" scope is enabled.';
+                } else if (error.message.includes('404')) {
+                    errorMsg += 'Repository or file not found. Verify owner/repo/file path.';
+                } else {
+                    errorMsg += error.message;
+                }
+                
+                showAlert(errorMsg, 'error');
                 document.getElementById('repoStatus').textContent = '❌ Error';
                 document.getElementById('repoStatus').style.color = 'var(--error)';
                 hideProgress();
